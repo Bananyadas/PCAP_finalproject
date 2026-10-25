@@ -1,104 +1,68 @@
-/**
- * flow_table.h — 5-tuple hash table for flow tracking.
+/*
+ * flow_table.h - Hash table mapping a directional 5-tuple to a Flow.
  *
- * Key design decisions:
- *   • Directional: (srcIP, srcPort, dstIP, dstPort, proto) ≠ its reverse.
- *   • Open addressing with linear probing; load-factor cap 0.70.
- *   • FlowRec.key stores the 64-bit FNV-1a hash of the 5-tuple.
- *     On hash collision the full FiveTuple is compared for correctness.
- *   • Eviction policy: NONE for offline PCAP analysis.
- *     All flows are kept in memory until the program exits.
- *     Call flow_table_finalize() to flush statistics.
- *   • NOT thread-safe for concurrent insertion/lookup.
- *     The caller must serialise flow-table operations
- *     (parse in parallel, then update the table sequentially).
+ * Design:
+ *  - FNV-1a 64-bit hash of the 5-tuple fields.
+ *  - Open addressing + linear probing; slots store (flow index + 1), 0 = empty.
+ *  - Table doubles when load factor would exceed 70%.
+ *  - On equal hashes we still compare the full tuple (collisions are safe).
+ *  - Flows live in a separate array in insertion order, so
+ *    flow_id = order of first appearance (deterministic).
+ *  - Eviction policy: NONE. Offline input is finite, so every flow stays
+ *    until end-of-file, where all flows are finalised together.
  */
-
 #ifndef FLOW_TABLE_H
 #define FLOW_TABLE_H
 
-#include "shared.h"
-#include "packet_parser.h"  /* FiveTuple */
-#include <vector>
-#include <cstdint>
+#include <stddef.h>
+#include <stdint.h>
+#include "packet_parser.h"
+#include "tcp_reassembly.h"
 
-/* -----------------------------------------------------------------------
- * FlowEntry — one slot in the open-addressing hash table.
- * --------------------------------------------------------------------- */
-struct FlowEntry {
-    bool      occupied;    /* true if this slot holds a live flow        */
-    FiveTuple tuple;       /* full 5-tuple for collision disambiguation  */
-    uint64_t  hash;        /* 64-bit FNV-1a hash of the tuple            */
-    uint32_t  flow_id;     /* stable, sequential ID assigned at insert   */
-    uint64_t  pkt_count;   /* number of packets seen for this flow       */
-    uint64_t  byte_count;  /* total captured bytes (headers + payload)   */
-};
+#define FLOW_NOT_FOUND UINT32_MAX
 
-/* -----------------------------------------------------------------------
- * FlowTable — the hash table itself.
- * --------------------------------------------------------------------- */
-struct FlowTable {
-    std::vector<FlowEntry> slots;
-    uint32_t capacity;     /* current slot count (always a power of two) */
-    uint32_t count;        /* number of occupied slots                   */
-    uint32_t next_flow_id; /* monotonically increasing flow ID           */
-};
+typedef struct {
+    FiveTuple tuple;
+    uint64_t  key;        /* FNV-1a hash of tuple */
+    uint32_t  flow_id;
+    uint64_t  packets;
+    TcpStream stream;
+} Flow;
 
-/* -----------------------------------------------------------------------
- * Public API
- * --------------------------------------------------------------------- */
+typedef struct {
+    uint32_t *slots;      /* size slot_cap, power of two */
+    size_t    slot_cap;
+    Flow     *flows;      /* insertion-ordered */
+    size_t    nflows;
+    size_t    flows_cap;
+} FlowTable;
 
-/**
- * flow_table_init — allocate a FlowTable with `initial_capacity` slots.
- * `initial_capacity` is rounded up to the next power of two.
- */
-FlowTable flow_table_init(uint32_t initial_capacity = 1024);
+/* Statistics from flow_process_packets(). */
+typedef struct {
+    uint64_t status_count[PARSE_STATUS_COUNT];
+    uint64_t tcp_packets;
+    uint64_t payload_bytes;
+} FlowStats;
 
-/**
- * flow_table_lookup — find the FlowEntry for a given 5-tuple.
- *
- * Returns a pointer to the entry if found, nullptr if not present.
- * Read-only; does not modify the table.
- */
-FlowEntry* flow_table_lookup(FlowTable& table, const FiveTuple& tuple);
+uint64_t fivetuple_hash (const FiveTuple *t);
+int      fivetuple_equal(const FiveTuple *a, const FiveTuple *b);
 
-/**
- * flow_table_insert — insert or update an entry for `tuple`.
- *
- * If the flow does not exist a new entry is created and a new flow_id
- * is assigned. `pkt_bytes` is added to byte_count.
- * Returns a pointer to the (possibly new) FlowEntry.
- * Resizes the table if load factor exceeds 0.70.
- */
-FlowEntry* flow_table_insert(FlowTable& table,
-                             const FiveTuple& tuple,
-                             uint64_t pkt_bytes);
+int      flow_table_init(FlowTable *ft, size_t initial_slots);
+void     flow_table_free(FlowTable *ft);
 
-/**
- * flow_table_to_flow_recs — convert the table to the shared FlowRec vector.
- *
- * FlowRec.key      = FlowEntry.hash  (64-bit FNV-1a hash)
- * FlowRec.bytes    = FlowEntry.byte_count
- * FlowRec.cost_est = 0.0f  (filled by cost predictor downstream)
- *
- * The output vector is sorted by flow_id for deterministic ordering.
- */
-std::vector<FlowRec> flow_table_to_flow_recs(const FlowTable& table);
+uint32_t flow_table_find(const FlowTable *ft, const FiveTuple *t);
+/* Returns flow_id, or FLOW_NOT_FOUND on out-of-memory. *created set to 1 if new. */
+uint32_t flow_table_get_or_insert(FlowTable *ft, const FiveTuple *t, int *created);
+/* Same, but with a caller-supplied hash (lets tests force collisions). */
+uint32_t flow_table_get_or_insert_hashed(FlowTable *ft, const FiveTuple *t,
+                                         uint64_t hash, int *created);
+/* Pointer is valid until the next insert (the flows array may move). */
+Flow    *flow_table_get(FlowTable *ft, uint32_t flow_id);
 
-/**
- * flow_table_print_stats — print a summary to stdout.
- */
-void flow_table_print_stats(const FlowTable& table);
-
-/**
- * fnv1a_64 — 64-bit FNV-1a hash of arbitrary bytes.
- * Exposed here so packet_parser and tests can use the same function.
- */
-uint64_t fnv1a_64(const void* data, size_t len);
-
-/**
- * tuple_hash — hash a FiveTuple with FNV-1a.
- */
-uint64_t tuple_hash(const FiveTuple& t);
+/* Sequential stage: feed every parsed packet (in file order) into the
+ * flow table + reassembler, then finalise all flows (EOF).
+ * Returns 0 on success, -1 on out-of-memory. */
+int flow_process_packets(FlowTable *ft, const PacketList *pl,
+                         const ParsedPacket *pp, FlowStats *stats);
 
 #endif /* FLOW_TABLE_H */

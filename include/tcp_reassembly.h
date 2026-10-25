@@ -1,113 +1,71 @@
-/**
- * tcp_reassembly.h — Sequence-ordered TCP payload reassembly.
+/*
+ * tcp_reassembly.h - Rebuilds one direction of a TCP byte stream.
  *
- * One ReassemblyBuffer per flow.
- *
- * Design:
- *   • Segments are stored in a std::map keyed by TCP sequence number.
- *   • `next_seq` tracks the first byte we still need.
- *   • As contiguous data arrives, bytes are drained from the map into
- *     `contiguous_data`.
- *   • Overlap policy (documented, first-wins):
- *       If a new segment overlaps already-accepted bytes, the overlapping
- *       portion is trimmed. Earlier data takes priority.
- *   • Out-of-order buffer is capped at OOO_BUFFER_LIMIT bytes per flow.
- *   • Gaps are recorded in `gaps` when the flow is finalised.
- *   • `carry` field is always 0; downstream batching owns it.
+ * Policies (easy to state in a viva):
+ *  - Sequence numbers are compared wraparound-safe: (int32_t)(a - b) < 0.
+ *  - FIRST-WINS: bytes we already hold (delivered or buffered) are never
+ *    overwritten by a later retransmission carrying different data.
+ *  - Out-of-order data is buffered in a sorted linked list, capped at
+ *    ooo_cap bytes per stream (default 64 MiB); excess is dropped and counted.
+ *  - GAPS: if bytes are missing at end-of-file, the buffered data after the
+ *    hole is NOT glued onto the stream; it is counted as "stranded".
+ *  - SYN consumes one sequence number (data starts at ISN + 1).
  */
-
 #ifndef TCP_REASSEMBLY_H
 #define TCP_REASSEMBLY_H
 
-#include <cstdint>
-#include <vector>
-#include <map>
-#include <string>
+#include <stddef.h>
+#include <stdint.h>
 
-/* Maximum bytes held in the out-of-order buffer per flow (64 MiB). */
-static constexpr size_t OOO_BUFFER_LIMIT = 64ULL * 1024 * 1024;
+#define TCP_OOO_CAP_DEFAULT (64u * 1024u * 1024u)
 
-/* -----------------------------------------------------------------------
- * SeqSegment — one buffered out-of-order TCP payload chunk.
- * --------------------------------------------------------------------- */
-struct SeqSegment {
-    uint32_t             seq;   /* TCP sequence number of first byte    */
-    std::vector<uint8_t> data;  /* payload bytes                        */
-};
+/* Simple growable byte buffer. */
+typedef struct {
+    uint8_t *data;
+    size_t   len;
+    size_t   cap;
+} ByteBuf;
 
-/* -----------------------------------------------------------------------
- * SeqGap — a range of missing sequence numbers detected at finalisation.
- * --------------------------------------------------------------------- */
-struct SeqGap {
-    uint32_t start_seq; /* first missing sequence number        */
-    uint32_t end_seq;   /* one past the last missing seq number */
-};
+/* One buffered out-of-order piece. The list never contains overlaps. */
+typedef struct OooSeg {
+    uint32_t seq;
+    uint32_t len;
+    uint8_t *data;
+    struct OooSeg *next;
+} OooSeg;
 
-/* -----------------------------------------------------------------------
- * ReassemblyBuffer — per-flow TCP reassembly state.
- * --------------------------------------------------------------------- */
-struct ReassemblyBuffer {
-    uint32_t flow_id;
+typedef struct {
+    /* state */
+    int      isn_set;        /* have we fixed the starting sequence?      */
+    uint32_t next_seq;       /* next byte we expect to append              */
+    int      syn_seen;
+    int      fin_seen;
+    int      finished;
+    ByteBuf  out;            /* reassembled, in-order bytes                */
+    OooSeg  *ooo;            /* sorted out-of-order list                   */
+    size_t   ooo_bytes;
+    size_t   ooo_cap;
 
-    /* Sequence number of the next expected byte.
-     * Initialised to the ISN + 1 when the first SYN is seen,
-     * or to the seq of the first data packet if we missed the SYN. */
-    uint32_t next_seq;
-    bool     initialized; /* false until we receive the first segment   */
+    /* statistics */
+    uint64_t packets;
+    uint64_t ooo_packets;      /* data packets that arrived ahead of time */
+    uint64_t retransmits;      /* packets that were 100% old data          */
+    uint64_t dup_bytes;        /* bytes discarded because already held     */
+    uint64_t ooo_dropped_bytes;/* bytes dropped because of the OOO cap     */
+    uint64_t gaps;             /* holes found at end-of-stream             */
+    uint64_t stranded_bytes;   /* buffered bytes after a hole (not output) */
+} TcpStream;
 
-    /* Contiguous reassembled payload bytes (already in order). */
-    std::vector<uint8_t> contiguous_data;
+void stream_init(TcpStream *s);
+/* Feed one TCP segment. Returns 0 on success, -1 on out-of-memory. */
+int  stream_add(TcpStream *s, uint32_t seq, uint8_t flags,
+                const uint8_t *payload, uint32_t len);
+/* Call once at end of input: accounts for gaps and frees the OOO list. */
+void stream_finish(TcpStream *s);
+void stream_free(TcpStream *s);
 
-    /* Out-of-order segments not yet drained, keyed by sequence number.
-     * std::map keeps them sorted, making drain efficient. */
-    std::map<uint32_t, std::vector<uint8_t>> ooo_buffer;
-
-    /* Bytes currently held in ooo_buffer (for the OOO_BUFFER_LIMIT cap). */
-    size_t ooo_bytes;
-
-    /* Sequence gaps detected at finalisation (or during reassembly). */
-    std::vector<SeqGap> gaps;
-
-    /* Statistics */
-    uint64_t retransmit_count;   /* segments trimmed as retransmissions  */
-    uint64_t ooo_drop_count;     /* segments dropped because OOO full    */
-    bool     has_gaps;           /* true if any gap was detected         */
-};
-
-/* -----------------------------------------------------------------------
- * Public API
- * --------------------------------------------------------------------- */
-
-/**
- * reassembly_buffer_init — create a fresh buffer for `flow_id`.
- */
-ReassemblyBuffer reassembly_buffer_init(uint32_t flow_id);
-
-/**
- * reassembly_add_segment — feed one TCP payload segment into the buffer.
- *
- * `seq`  — TCP sequence number of the first payload byte.
- * `data` — pointer to payload bytes.
- * `len`  — number of payload bytes.
- *
- * Thread-safety: call only from one thread per buffer (same flow).
- */
-void reassembly_add_segment(ReassemblyBuffer& buf,
-                            uint32_t seq,
-                            const uint8_t* data,
-                            uint16_t len);
-
-/**
- * reassembly_finalize — signal end-of-capture for this flow.
- *
- * Scans ooo_buffer for any remaining segments, records gaps, and
- * sets `has_gaps` appropriately.
- */
-void reassembly_finalize(ReassemblyBuffer& buf);
-
-/**
- * reassembly_print_stats — print per-flow stats (gaps, retransmits, size).
- */
-void reassembly_print_stats(const ReassemblyBuffer& buf);
+/* Wraparound-safe sequence comparisons (exposed for tests). */
+static inline int seq_lt (uint32_t a, uint32_t b) { return (int32_t)(a - b) <  0; }
+static inline int seq_leq(uint32_t a, uint32_t b) { return (int32_t)(a - b) <= 0; }
 
 #endif /* TCP_REASSEMBLY_H */
