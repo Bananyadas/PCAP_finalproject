@@ -1,0 +1,11 @@
+# sample.rules — a handful of Emerging Threats style rules for unit testing.
+# The real experiments use the full ET Open ruleset; this file exists so the
+# tests run with no download.
+
+alert tcp any any -> any 80 (msg:"WEB admin panel access"; content:"/admin.php?cmd="; sid:2000001;)
+alert tcp any any -> any 80 (msg:"WEB admin path"; content:"/admin"; sid:2000002;)
+alert tcp any any -> any any (msg:"SQL injection attempt"; content:"SELECT * FROM"; nocase; sid:2000003;)
+alert tcp any any -> any any (msg:"Shellcode NOP sled"; content:"|90 90 90|"; sid:2000004;)
+alert tcp any any -> any any (msg:"Botnet C2 beacon"; content:"evilbot"; content:"|00 ff|"; sid:2000005;)
+alert tcp any any -> any 443 (msg:"Escaped quote test"; content:"say \"hello\""; sid:2000006;)
+alert tcp any any -> any any (msg:"Negated content ignored"; content:!"benign"; content:"payload=../.."; sid:2000007;)

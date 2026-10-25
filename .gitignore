@@ -1,0 +1,13 @@
+# compiled binaries
+test_cpu
+test_gpu
+dump_patterns
+*.o
+
+# the ET ruleset is large and re-downloadable
+rules/et.rules
+rules/*.tar.gz
+rules/rules/
+
+# archives
+*.tar.gz
