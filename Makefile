@@ -1,44 +1,41 @@
-# Makefile — host-only build works anywhere; GPU targets need nvcc.
-#
-#   make test        CPU reference tests (no GPU needed)
-#   make gputest     CPU-vs-GPU diff      (needs nvcc + a GPU)
+# Makefile - PCAP Input & Flow Management (C11 + OpenMP + libpcap)
 
-CXX      ?= g++
-NVCC     ?= nvcc
-CXXFLAGS := -O2 -std=c++17 -Iinclude -Wall -Wextra
-NVFLAGS  := -O3 -std=c++17 -Iinclude -lineinfo
+CC      := gcc
+CFLAGS  := -std=c11 -Wall -Wextra -O2 -fopenmp -Iinclude -D_DEFAULT_SOURCE
+LDLIBS  := -lpcap -fopenmp
 
-HOST_SRC := src/rules.cpp src/pfac.cpp src/cpu_match.cpp
+LIB_SRC := src/packet_parser.c src/flow_table.c src/tcp_reassembly.c src/flow_export.c
+LIB_OBJ := $(LIB_SRC:src/%.c=build/%.o)
+TESTS   := test_parser test_flow_table test_reassembly test_export
+PCAP    := data/netmetria-focused-scenario.pcap
 
-.PHONY: all test gputest dump clean
+.PHONY: all tests run_tests smoke smoke1 clean
 
-all: test
+all: pcap_flow tests
 
-test: test_cpu
-	./test_cpu
+build:
+	mkdir -p build
 
-test_cpu: tests/test_cpu.cpp $(HOST_SRC)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+build/%.o: src/%.c include/*.h | build
+	$(CC) $(CFLAGS) -c $< -o $@
 
-gputest: test_gpu
-	./test_gpu
+pcap_flow: build/main.o $(LIB_OBJ)
+	$(CC) $^ -o $@ $(LDLIBS)
 
-test_gpu: tests/test_gpu.cu src/gpu_match.cu $(HOST_SRC)
-	$(NVCC) $(NVFLAGS) -o $@ $^
+tests: $(TESTS)
 
-# Profiling: warp execution efficiency is the metric that shows WHY the
-# adaptive composer helps. Run this once the composer is wired in.
-profile: test_gpu
-	ncu --metrics smsp__thread_inst_executed_per_inst_executed.ratio,\
-sm__warps_active.avg.pct_of_peak_sustained_active ./test_gpu
+test_%: tests/test_%.c tests/test_util.h $(LIB_OBJ)
+	$(CC) $(CFLAGS) $< $(LIB_OBJ) -o $@ $(LDLIBS)
+
+run_tests: tests
+	@fail=0; for t in $(TESTS); do ./$$t || fail=1; done; \
+	if [ $$fail -eq 0 ]; then echo "ALL TEST SUITES PASSED"; else echo "SOME TESTS FAILED"; exit 1; fi
+
+smoke: pcap_flow
+	./pcap_flow $(PCAP) 4
+
+smoke1: pcap_flow
+	./pcap_flow $(PCAP) 1
 
 clean:
-	rm -f test_cpu test_gpu dump_patterns
-
-# Inspect what the parser pulls out of a .rules file:
-#   make dump RULES=rules/et.rules
-dump: dump_patterns
-	./dump_patterns $(RULES) | head -40
-
-dump_patterns: tools/dump_patterns.cpp src/rules.cpp
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	rm -rf build pcap_flow $(TESTS) *.pcap
