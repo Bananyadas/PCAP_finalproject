@@ -42,3 +42,11 @@ fakegpu: $(CORE) $(HDRS) gpu_fake.c
 clean:
 	rm -f *.o bench bench_nopcap bench_gpu_nopcap bench_fakegpu
 .PHONY: all nopcap gpu-nopcap fakegpu clean
+
+# --- Asmita's kernel, built as a second binary so the two can be compared ---
+#   make gpu-asmita ARCH=sm_75   ->  ./bench_gpu_asmita
+gpu-asmita: bench_gpu_asmita
+bench_gpu_asmita: $(CORE) $(HDRS) gpu_scan.cu kernel_asmita.cu
+	$(CC) -O2 -std=c11 -Wall -Wextra -DUSE_GPU -I$(CUDA_INC) -c $(CORE)
+	$(NVCC) -O2 -arch=$(ARCH) -c gpu_scan.cu kernel_asmita.cu
+	$(NVCC) -arch=$(ARCH) -o $@ $(OBJS) gpu_scan.o kernel_asmita.o -lm -lpthread
