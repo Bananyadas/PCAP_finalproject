@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.pcap binary
+*.flows binary
+*.o binary
+*.ipynb text eol=lf

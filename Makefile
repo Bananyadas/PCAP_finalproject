@@ -52,6 +52,7 @@ CXXFLAGS  := -O2 -std=c++17 -Iinclude -Wall -Wextra
 NVFLAGS   := -O3 -std=c++17 -Iinclude -lineinfo
 
 MATCH_SRC := src/rules.cpp src/pfac.cpp src/cpu_match.cpp
+RULES     ?= rules/sample.rules
 
 .PHONY: matcher_test gputest dump matcher_clean
 

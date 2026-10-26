@@ -3,6 +3,15 @@ test_cpu
 test_gpu
 dump_patterns
 *.o
+build/
+pcap_flow
+test_parser
+test_flow_table
+test_reassembly
+test_export
+
+# regenerable with ananya/tools/gen_traces.py
+ananya/traces/
 
 # the ET ruleset is large and re-downloadable
 rules/et.rules
