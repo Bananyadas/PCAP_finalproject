@@ -39,3 +39,39 @@ smoke1: pcap_flow
 
 clean:
 	rm -rf build pcap_flow $(TESTS) *.pcap
+
+# ---------------------------------------------------------------------------
+# Matcher (Asmita) - C++17 and CUDA
+# nvcc only compiles C++, so this half stays C++ while Ananyaraj's stays C.
+# Linking is done by g++ or nvcc, never gcc, so the C++ runtime is included.
+# ---------------------------------------------------------------------------
+
+CXX       ?= g++
+NVCC      ?= nvcc
+CXXFLAGS  := -O2 -std=c++17 -Iinclude -Wall -Wextra
+NVFLAGS   := -O3 -std=c++17 -Iinclude -lineinfo
+
+MATCH_SRC := src/rules.cpp src/pfac.cpp src/cpu_match.cpp
+
+.PHONY: matcher_test gputest dump matcher_clean
+
+matcher_test: test_cpu
+	./test_cpu
+
+test_cpu: tests/test_cpu.cpp $(MATCH_SRC)
+	$(CXX) $(CXXFLAGS) -o $@ $^
+
+gputest: test_gpu
+	./test_gpu
+
+test_gpu: tests/test_gpu.cu src/gpu_match.cu $(MATCH_SRC)
+	$(NVCC) $(NVFLAGS) -o $@ $^
+
+dump: dump_patterns
+	./dump_patterns $(RULES) | head -40
+
+dump_patterns: tools/dump_patterns.cpp src/rules.cpp
+	$(CXX) $(CXXFLAGS) -o $@ $^
+
+matcher_clean:
+	rm -f test_cpu test_gpu dump_patterns
