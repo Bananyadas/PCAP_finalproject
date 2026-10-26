@@ -10,6 +10,13 @@
 
 #include <stdint.h>
 
+/* static_assert is spelled differently in C and C++; the matcher is C++. */
+#ifdef __cplusplus
+  #define SHARED_ASSERT(cond, msg) static_assert(cond, msg)
+#else
+  #define SHARED_ASSERT(cond, msg) _Static_assert(cond, msg)
+#endif
+
 /* One contiguous run of reassembled payload bytes inside the byte arena. */
 typedef struct {
     uint32_t flow_id;   /* which flow these bytes belong to              */
@@ -33,8 +40,8 @@ typedef struct {
 } FlowRec;
 
 /* Compile-time guards so an accidental layout change breaks the build. */
-_Static_assert(sizeof(Segment) == 16, "Segment layout changed");
-_Static_assert(sizeof(Match)   == 12, "Match layout changed");
-_Static_assert(sizeof(FlowRec) == 24, "FlowRec layout changed");
+SHARED_ASSERT(sizeof(Segment) == 16, "Segment layout changed");
+SHARED_ASSERT(sizeof(Match)   == 12, "Match layout changed");
+SHARED_ASSERT(sizeof(FlowRec) == 24, "FlowRec layout changed");
 
 #endif /* SHARED_H */
