@@ -289,8 +289,8 @@ int main(int argc, char** argv) {
     for (int k = 0; k < nr; k++) {
         const RunStats* s = &st[k];
         if (o.use_gpu)
-            printf("%-9s %7zu %7.0fms %7.0fms %7.0fms %9s %9s %11s %9zu\n", rows[k].name, s->batches, s->compose_ms,
-                   s->scan_ms, s->wall_ms, "n/a", "n/a", "n/a", al[k].n);
+            printf("%-9s %7zu %7.0fms %7.0fms %7.0fms %9s %9.2f %11s %9zu\n", rows[k].name, s->batches, s->compose_ms,
+                   s->scan_ms, s->wall_ms, "n/a", s->worst_batch_ratio, "n/a", al[k].n);
         else
             printf("%-9s %7zu %7.0fms %7.0fms %7.0fms %8.1f%% %9.2f %11.0f %9zu\n", rows[k].name, s->batches, s->compose_ms,
                    s->scan_ms, s->wall_ms, s->warp_steps ? 100.0 * (double)s->steps / (32.0 * (double)s->warp_steps) : 0.0,

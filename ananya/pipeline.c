@@ -84,6 +84,14 @@ void run_pipeline(ComposeFn compose, const Flows* F, CostPredictor* pred, const 
                 gpu_collect((GpuScanner*)gpu, slot, gm, &nm, seg_cost);
                 mv.n = 0;
                 for (uint32_t i = 0; i < nm; i++) matchvec_push(&mv, gm[i]);
+                /* heavy/avg on the GPU too: the kernel returns steps per
+                 * segment, so the batch total is just their sum. */
+                {
+                    double tot = 0;
+                    for (size_t i = 0; i < b->nsegs; i++) tot += (double)seg_cost[i];
+                    if (nbs == bscap) { bscap = bscap ? bscap * 2 : 64; bsteps = (double*)realloc(bsteps, bscap * sizeof(double)); }
+                    bsteps[nbs++] = tot;
+                }
             } else
 #endif
             {
